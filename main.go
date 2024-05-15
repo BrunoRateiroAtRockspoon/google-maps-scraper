@@ -51,7 +51,7 @@ func run() error {
 	args := parseArgs()
 
 	if args.dsn == "" {
-		return runFromLocalFile(ctx, &args)
+		return runFromString(ctx, &args)
 	}
 
 	return runFromDatabase(ctx, &args)
@@ -120,6 +120,67 @@ func runFromLocalFile(ctx context.Context, args *arguments) error {
 		writers,
 		opts...,
 	)
+	if err != nil {
+		return err
+	}
+
+	app, err := scrapemateapp.NewScrapeMateApp(cfg)
+	if err != nil {
+		return err
+	}
+
+	seedJobs, err := createSeedJobs(args.langCode, input, args.maxDepth, args.email)
+	if err != nil {
+		return err
+	}
+
+	return app.Start(ctx, seedJobs...)
+}
+
+func runFromString(ctx context.Context, args *arguments) error {
+	// Hardcoded input string
+	inputString := "El Paisano Restaurant Food Mexican, 1006 6th St, Taft, CA 93268"
+	input := strings.NewReader(inputString)
+
+	var resultsWriter io.Writer
+
+	switch args.resultsFile {
+	case "stdout":
+		resultsWriter = os.Stdout
+	default:
+		f, err := os.Create(args.resultsFile)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		resultsWriter = f
+	}
+
+	csvWriter := csvwriter.NewCsvWriter(csv.NewWriter(resultsWriter))
+
+	writers := []scrapemate.ResultWriter{}
+
+	if args.json {
+		writers = append(writers, jsonwriter.NewJSONWriter(resultsWriter))
+	} else {
+		writers = append(writers, csvWriter)
+	}
+
+	opts := []func(*scrapemateapp.Config) error{
+		scrapemateapp.WithConcurrency(args.concurrency),
+		scrapemateapp.WithExitOnInactivity(args.exitOnInactivityDuration),
+	}
+
+	if args.debug {
+		opts = append(opts, scrapemateapp.WithJS(
+			scrapemateapp.Headfull(),
+			scrapemateapp.DisableImages(),
+		))
+	} else {
+		opts = append(opts, scrapemateapp.WithJS(scrapemateapp.DisableImages()))
+	}
+
+	cfg, err := scrapemateapp.NewConfig(writers, opts...)
 	if err != nil {
 		return err
 	}

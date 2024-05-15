@@ -89,84 +89,69 @@ func (j *GmapJob) Process(ctx context.Context, resp *scrapemate.Response) (any, 
 func (j *GmapJob) BrowserActions(ctx context.Context, page playwright.Page) scrapemate.Response {
 	var resp scrapemate.Response
 
+	// Navigate to the initial search URL
 	pageResponse, err := page.Goto(j.GetFullURL(), playwright.PageGotoOptions{
 		WaitUntil: playwright.WaitUntilStateDomcontentloaded,
 	})
 
 	if err != nil {
 		resp.Error = err
-
 		return resp
 	}
 
+	// Handle the cookie consent if required
 	if err = clickRejectCookiesIfRequired(page); err != nil {
 		resp.Error = err
-
 		return resp
 	}
 
-	const defaultTimeout = 5000
-
-	err = page.WaitForURL(page.URL(), playwright.PageWaitForURLOptions{
-		WaitUntil: playwright.WaitUntilStateDomcontentloaded,
-		Timeout:   playwright.Float(defaultTimeout),
+	// Wait for the load state to ensure redirection is complete
+	const defaultTimeout = 10000 // Increase timeout to handle redirection
+	err = page.WaitForLoadState(playwright.PageWaitForLoadStateOptions{
+		Timeout: playwright.Float(defaultTimeout),
 	})
 
 	if err != nil {
 		resp.Error = err
-
 		return resp
 	}
 
-	resp.URL = pageResponse.URL()
-	resp.StatusCode = pageResponse.Status()
-	resp.Headers = make(http.Header, len(pageResponse.Headers()))
+	// Retry mechanism to check for redirection
+	const maxRetries = 5
+	for i := 0; i < maxRetries; i++ {
+		finalURL := page.URL()
+		if strings.Contains(finalURL, "/maps/place/") {
+			resp.URL = finalURL
+			resp.StatusCode = pageResponse.Status()
+			resp.Headers = make(http.Header, len(pageResponse.Headers()))
+			for k, v := range pageResponse.Headers() {
+				resp.Headers.Add(k, v)
+			}
 
-	for k, v := range pageResponse.Headers() {
-		resp.Headers.Add(k, v)
-	}
+			// Extract the page content for the place
+			body, err := page.Content()
+			if err != nil {
+				resp.Error = err
+				return resp
+			}
 
-	if strings.Contains(page.URL(), "/maps/place/") {
-		resp.URL = page.URL()
-
-		var body string
-
-		body, err = page.Content()
-		if err != nil {
-			resp.Error = err
+			resp.Body = []byte(body)
 			return resp
 		}
 
-		resp.Body = []byte(body)
-
-		return resp
+		// Wait for a while before checking again
+		page.WaitForTimeout(2000) // Wait for 2 seconds before retrying
 	}
 
-	_, err = scroll(ctx, page, j.MaxDepth)
-	if err != nil {
-		resp.Error = err
-
-		return resp
-	}
-
-	body, err := page.Content()
-	if err != nil {
-		resp.Error = err
-		return resp
-	}
-
-	resp.Body = []byte(body)
-
+	resp.Error = fmt.Errorf("unexpected URL after navigation: %s", page.URL())
 	return resp
 }
 
 func clickRejectCookiesIfRequired(page playwright.Page) error {
-	// click the cookie reject button if exists
 	sel := `form[action="https://consent.google.com/save"]:first-of-type button:first-of-type`
 
 	const timeout = 500
 
-	//nolint:staticcheck // TODO replace with the new playwright API
 	el, err := page.WaitForSelector(sel, playwright.PageWaitForSelectorOptions{
 		Timeout: playwright.Float(timeout),
 	})
@@ -179,7 +164,6 @@ func clickRejectCookiesIfRequired(page playwright.Page) error {
 		return nil
 	}
 
-	//nolint:staticcheck // TODO replace with the new playwright API
 	return el.Click()
 }
 
@@ -197,7 +181,6 @@ func scroll(ctx context.Context, page playwright.Page, maxDepth int) (int, error
 	}`
 
 	var currentScrollHeight int
-	// Scroll to the bottom of the page.
 	waitTime := 100.
 	cnt := 0
 
@@ -214,7 +197,6 @@ func scroll(ctx context.Context, page playwright.Page, maxDepth int) (int, error
 			waitTime2 = maxWait2
 		}
 
-		// Scroll to the bottom of the page.
 		scrollHeight, err := page.Evaluate(fmt.Sprintf(expr, waitTime2))
 		if err != nil {
 			return cnt, err
@@ -243,7 +225,6 @@ func scroll(ctx context.Context, page playwright.Page, maxDepth int) (int, error
 			waitTime = maxWait2
 		}
 
-		//nolint:staticcheck // TODO replace with the new playwright API
 		page.WaitForTimeout(waitTime)
 	}
 
