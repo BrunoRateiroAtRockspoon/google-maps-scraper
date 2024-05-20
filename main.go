@@ -3,281 +3,131 @@ package main
 import (
 	"bufio"
 	"context"
-	"database/sql"
-	"encoding/csv"
-	"flag"
-	"io"
-	"os"
-	"runtime"
+	"encoding/json"
+	"fmt"
+	"io" // Add the io package
+	"net/http"
 	"strings"
 	"time"
 
-	// postgres driver
-	_ "github.com/jackc/pgx/v5/stdlib"
-
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+	"github.com/gosom/google-maps-scraper/gmaps"
 	"github.com/gosom/scrapemate"
-	"github.com/gosom/scrapemate/adapters/writers/csvwriter"
 	"github.com/gosom/scrapemate/adapters/writers/jsonwriter"
 	"github.com/gosom/scrapemate/scrapemateapp"
-	"github.com/playwright-community/playwright-go"
-
-	"github.com/gosom/google-maps-scraper/gmaps"
-	"github.com/gosom/google-maps-scraper/postgres"
 )
 
-func main() {
-	// just install playwright
-	if os.Getenv("PLAYWRIGHT_INSTALL_ONLY") == "1" {
-		if err := installPlaywright(); err != nil {
-			os.Exit(1)
-		}
+type arguments struct {
+	concurrency              int
+	cacheDir                 string
+	maxDepth                 int
+	resultsFile              string
+	json                     bool
+	langCode                 string
+	debug                    bool
+	dsn                      string
+	produceOnly              bool
+	exitOnInactivityDuration time.Duration
+	email                    bool
+}
 
-		os.Exit(0)
-	}
+// Result represents the structure of the scraping result
+type Result struct {
+	Data interface{} `json:"data"`
+}
 
-	if err := run(); err != nil {
-		os.Stderr.WriteString(err.Error() + "\n")
-
-		os.Exit(1)
-
+// scrapeHandler is the HTTP handler for the scraping API
+func scrapeHandler(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query().Get("query")
+	if query == "" {
+		http.Error(w, "Missing query parameter", http.StatusBadRequest)
 		return
 	}
 
-	os.Exit(0)
-}
+	// Create a context with a longer timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
 
-func run() error {
-	ctx := context.Background()
-	args := parseArgs()
-
-	if args.dsn == "" {
-		return runFromString(ctx, &args)
+	// Define your scraping arguments
+	args := arguments{
+		concurrency:              4,
+		maxDepth:                 10,
+		json:                     true,
+		langCode:                 "en",
+		exitOnInactivityDuration: 40 * time.Second,
 	}
 
-	return runFromDatabase(ctx, &args)
-}
+	// Create a channel to receive the result
+	resultChan := make(chan Result)
+	errorChan := make(chan error)
 
-func runFromLocalFile(ctx context.Context, args *arguments) error {
-	var input io.Reader
-
-	switch args.inputFile {
-	case "stdin":
-		input = os.Stdin
-	default:
-		f, err := os.Open(args.inputFile)
+	// Run the scraping in a separate goroutine
+	go func() {
+		result, err := runFromString(ctx, &args, query)
 		if err != nil {
-			return err
+			errorChan <- err
+		} else {
+			resultChan <- result
 		}
+	}()
 
-		defer f.Close()
-
-		input = f
+	// Wait for the result and send the response as soon as it's ready
+	select {
+	case result := <-resultChan:
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(result)
+	case err := <-errorChan:
+		http.Error(w, fmt.Sprintf("Failed to scrape: %v", err), http.StatusInternalServerError)
+	case <-ctx.Done():
+		http.Error(w, "Request timed out", http.StatusGatewayTimeout)
 	}
-
-	var resultsWriter io.Writer
-
-	switch args.resultsFile {
-	case "stdout":
-		resultsWriter = os.Stdout
-	default:
-		f, err := os.Create(args.resultsFile)
-		if err != nil {
-			return err
-		}
-
-		defer f.Close()
-
-		resultsWriter = f
-	}
-
-	csvWriter := csvwriter.NewCsvWriter(csv.NewWriter(resultsWriter))
-
-	writers := []scrapemate.ResultWriter{}
-
-	if args.json {
-		writers = append(writers, jsonwriter.NewJSONWriter(resultsWriter))
-	} else {
-		writers = append(writers, csvWriter)
-	}
-
-	opts := []func(*scrapemateapp.Config) error{
-		// scrapemateapp.WithCache("leveldb", "cache"),
-		scrapemateapp.WithConcurrency(args.concurrency),
-		scrapemateapp.WithExitOnInactivity(args.exitOnInactivityDuration),
-	}
-
-	if args.debug {
-		opts = append(opts, scrapemateapp.WithJS(
-			scrapemateapp.Headfull(),
-			scrapemateapp.DisableImages(),
-		),
-		)
-	} else {
-		opts = append(opts, scrapemateapp.WithJS(scrapemateapp.DisableImages()))
-	}
-
-	cfg, err := scrapemateapp.NewConfig(
-		writers,
-		opts...,
-	)
-	if err != nil {
-		return err
-	}
-
-	app, err := scrapemateapp.NewScrapeMateApp(cfg)
-	if err != nil {
-		return err
-	}
-
-	seedJobs, err := createSeedJobs(args.langCode, input, args.maxDepth, args.email)
-	if err != nil {
-		return err
-	}
-
-	return app.Start(ctx, seedJobs...)
 }
 
-func runFromString(ctx context.Context, args *arguments) error {
-	// Hardcoded input string
-	inputString := "El Paisano Restaurant Food Mexican, 1006 6th St, Taft, CA 93268"
+// runFromString scrapes data based on the input query string
+func runFromString(ctx context.Context, args *arguments, inputString string) (Result, error) {
 	input := strings.NewReader(inputString)
 
-	var resultsWriter io.Writer
+	// Create a results writer
+	resultsWriter := &strings.Builder{}
 
-	switch args.resultsFile {
-	case "stdout":
-		resultsWriter = os.Stdout
-	default:
-		f, err := os.Create(args.resultsFile)
-		if err != nil {
-			return err
-		}
-		defer f.Close()
-		resultsWriter = f
-	}
+	jsonWriter := jsonwriter.NewJSONWriter(resultsWriter)
 
-	csvWriter := csvwriter.NewCsvWriter(csv.NewWriter(resultsWriter))
-
-	writers := []scrapemate.ResultWriter{}
-
-	if args.json {
-		writers = append(writers, jsonwriter.NewJSONWriter(resultsWriter))
-	} else {
-		writers = append(writers, csvWriter)
-	}
+	writers := []scrapemate.ResultWriter{jsonWriter}
 
 	opts := []func(*scrapemateapp.Config) error{
 		scrapemateapp.WithConcurrency(args.concurrency),
 		scrapemateapp.WithExitOnInactivity(args.exitOnInactivityDuration),
-	}
-
-	if args.debug {
-		opts = append(opts, scrapemateapp.WithJS(
-			scrapemateapp.Headfull(),
-			scrapemateapp.DisableImages(),
-		))
-	} else {
-		opts = append(opts, scrapemateapp.WithJS(scrapemateapp.DisableImages()))
+		scrapemateapp.WithJS(scrapemateapp.DisableImages()),
 	}
 
 	cfg, err := scrapemateapp.NewConfig(writers, opts...)
 	if err != nil {
-		return err
+		return Result{}, err
 	}
 
 	app, err := scrapemateapp.NewScrapeMateApp(cfg)
 	if err != nil {
-		return err
+		return Result{}, err
 	}
 
 	seedJobs, err := createSeedJobs(args.langCode, input, args.maxDepth, args.email)
 	if err != nil {
-		return err
+		return Result{}, err
 	}
 
-	return app.Start(ctx, seedJobs...)
+	err = app.Start(ctx, seedJobs...)
+	if err != nil {
+		return Result{}, err
+	}
+
+	return Result{Data: resultsWriter.String()}, nil
 }
 
-func runFromDatabase(ctx context.Context, args *arguments) error {
-	db, err := openPsqlConn(args.dsn)
-	if err != nil {
-		return err
-	}
-
-	provider := postgres.NewProvider(db)
-
-	if args.produceOnly {
-		return produceSeedJobs(ctx, args, provider)
-	}
-
-	psqlWriter := postgres.NewResultWriter(db)
-
-	writers := []scrapemate.ResultWriter{
-		psqlWriter,
-	}
-
-	opts := []func(*scrapemateapp.Config) error{
-		// scrapemateapp.WithCache("leveldb", "cache"),
-		scrapemateapp.WithConcurrency(args.concurrency),
-		scrapemateapp.WithProvider(provider),
-		scrapemateapp.WithExitOnInactivity(args.exitOnInactivityDuration),
-	}
-
-	if args.debug {
-		opts = append(opts, scrapemateapp.WithJS(scrapemateapp.Headfull()))
-	} else {
-		opts = append(opts, scrapemateapp.WithJS())
-	}
-
-	cfg, err := scrapemateapp.NewConfig(
-		writers,
-		opts...,
-	)
-	if err != nil {
-		return err
-	}
-
-	app, err := scrapemateapp.NewScrapeMateApp(cfg)
-	if err != nil {
-		return err
-	}
-
-	return app.Start(ctx)
-}
-
-func produceSeedJobs(ctx context.Context, args *arguments, provider scrapemate.JobProvider) error {
-	var input io.Reader
-
-	switch args.inputFile {
-	case "stdin":
-		input = os.Stdin
-	default:
-		f, err := os.Open(args.inputFile)
-		if err != nil {
-			return err
-		}
-
-		defer f.Close()
-
-		input = f
-	}
-
-	jobs, err := createSeedJobs(args.langCode, input, args.maxDepth, args.email)
-	if err != nil {
-		return err
-	}
-
-	for i := range jobs {
-		if err := provider.Push(ctx, jobs[i]); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func createSeedJobs(langCode string, r io.Reader, maxDepth int, email bool) (jobs []scrapemate.IJob, err error) {
+// createSeedJobs creates seed jobs from the input query
+func createSeedJobs(langCode string, r io.Reader, maxDepth int, email bool) ([]scrapemate.IJob, error) {
 	scanner := bufio.NewScanner(r)
+	var jobs []scrapemate.IJob
 
 	for scanner.Scan() {
 		query := strings.TrimSpace(scanner.Text())
@@ -286,7 +136,6 @@ func createSeedJobs(langCode string, r io.Reader, maxDepth int, email bool) (job
 		}
 
 		var id string
-
 		if before, after, ok := strings.Cut(query, "#!#"); ok {
 			query = strings.TrimSpace(before)
 			id = strings.TrimSpace(after)
@@ -298,61 +147,10 @@ func createSeedJobs(langCode string, r io.Reader, maxDepth int, email bool) (job
 	return jobs, scanner.Err()
 }
 
-func installPlaywright() error {
-	return playwright.Install()
-}
+func main() {
+	r := chi.NewRouter()
+	r.Use(middleware.Logger)
+	r.Get("/scrape", scrapeHandler)
 
-type arguments struct {
-	concurrency              int
-	cacheDir                 string
-	maxDepth                 int
-	inputFile                string
-	resultsFile              string
-	json                     bool
-	langCode                 string
-	debug                    bool
-	dsn                      string
-	produceOnly              bool
-	exitOnInactivityDuration time.Duration
-	email                    bool
-}
-
-func parseArgs() (args arguments) {
-	const (
-		defaultDepth      = 10
-		defaultCPUDivider = 2
-	)
-
-	defaultConcurency := runtime.NumCPU() / defaultCPUDivider
-	if defaultConcurency < 1 {
-		defaultConcurency = 1
-	}
-
-	flag.IntVar(&args.concurrency, "c", defaultConcurency, "sets the concurrency. By default it is set to half of the number of CPUs")
-	flag.StringVar(&args.cacheDir, "cache", "cache", "sets the cache directory (no effect at the moment)")
-	flag.IntVar(&args.maxDepth, "depth", defaultDepth, "is how much you allow the scraper to scroll in the search results. Experiment with that value")
-	flag.StringVar(&args.resultsFile, "results", "stdout", "is the path to the file where the results will be written")
-	flag.StringVar(&args.inputFile, "input", "stdin", "is the path to the file where the queries are stored (one query per line). By default it reads from stdin")
-	flag.StringVar(&args.langCode, "lang", "en", "is the languate code to use for google (the hl urlparam).Default is en . For example use de for German or el for Greek")
-	flag.BoolVar(&args.debug, "debug", false, "Use this to perform a headfull crawl (it will open a browser window) [only when using without docker]")
-	flag.StringVar(&args.dsn, "dsn", "", "Use this if you want to use a database provider")
-	flag.BoolVar(&args.produceOnly, "produce", false, "produce seed jobs only (only valid with dsn)")
-	flag.DurationVar(&args.exitOnInactivityDuration, "exit-on-inactivity", 0, "program exits after this duration of inactivity(example value '5m')")
-	flag.BoolVar(&args.json, "json", false, "Use this to produce a json file instead of csv (not available when using db)")
-	flag.BoolVar(&args.email, "email", false, "Use this to extract emails from the websites")
-
-	flag.Parse()
-
-	return args
-}
-
-func openPsqlConn(dsn string) (conn *sql.DB, err error) {
-	conn, err = sql.Open("pgx", dsn)
-	if err != nil {
-		return
-	}
-
-	err = conn.Ping()
-
-	return
+	http.ListenAndServe(":8080", r)
 }
