@@ -22,4 +22,6 @@ RUN go build -o /usr/bin/google-maps-scraper
 
 RUN PLAYWRIGHT_INSTALL_ONLY=1 google-maps-scraper
 
+EXPOSE 8080
+
 ENTRYPOINT ["google-maps-scraper"]
