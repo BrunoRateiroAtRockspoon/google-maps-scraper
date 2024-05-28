@@ -32,33 +32,43 @@ func main() {
 }
 
 func scrapeHandler(w http.ResponseWriter, r *http.Request) {
-	ctx := context.Background()
+	// Create a channel to signal when the request is done
+	done := make(chan struct{})
 
-	query := r.URL.Query().Get("query")
-	if query == "" {
-		http.Error(w, "query parameter is required", http.StatusBadRequest)
-		return
-	}
+	go func() {
+		defer close(done) // Ensure the channel is closed when the request is done
 
-	args := getScrapeArgs()
-	job := createJob(args.langCode, strings.TrimSpace(query), args.maxDepth, args.email)
+		ctx := context.Background()
 
-	writers := []scrapemate.ResultWriter{
-		jsonwriter.NewJSONWriter(w),
-	}
-	w.Header().Set("Content-Type", "application/json")
+		query := r.URL.Query().Get("query")
+		if query == "" {
+			http.Error(w, "query parameter is required", http.StatusBadRequest)
+			return
+		}
 
-	app, err := newScrapeApp(args, writers)
-	if err != nil {
-		httpError(w, err)
-		return
-	}
+		args := getScrapeArgs()
+		job := createJob(args.langCode, strings.TrimSpace(query), args.maxDepth, args.email)
 
-	logrus.Infof("Starting job for query: %s", query)
-	if err := app.Start(ctx, job); err != nil {
-		httpError(w, err)
-	}
-	logrus.Infof("Finished job for query: %s", query)
+		writers := []scrapemate.ResultWriter{
+			jsonwriter.NewJSONWriter(w),
+		}
+		w.Header().Set("Content-Type", "application/json")
+
+		app, err := newScrapeApp(args, writers)
+		if err != nil {
+			httpError(w, err)
+			return
+		}
+
+		logrus.Infof("Starting job for query: %s", query)
+		if err := app.Start(ctx, job); err != nil {
+			httpError(w, err)
+		}
+		logrus.Infof("Finished job for query: %s", query)
+	}()
+
+	// Wait for the goroutine to finish before returning
+	<-done
 }
 
 func getScrapeArgs() arguments {
@@ -66,7 +76,7 @@ func getScrapeArgs() arguments {
 		concurrency:              runtime.NumCPU(), // Use all CPUs for better concurrency
 		maxDepth:                 1,
 		langCode:                 "en",
-		exitOnInactivityDuration: 60 * time.Second, // Increase inactivity duration
+		exitOnInactivityDuration: 20 * time.Second, // Increase inactivity duration
 	}
 }
 
