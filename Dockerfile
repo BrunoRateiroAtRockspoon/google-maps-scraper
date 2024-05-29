@@ -15,6 +15,8 @@ ENV GOARCH=amd64
 WORKDIR /app
 
 COPY go.mod go.sum ./
+COPY local-scrapemate ./local-scrapemate
+
 RUN go mod download
 COPY . .
 

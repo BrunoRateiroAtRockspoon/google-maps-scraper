@@ -25,7 +25,7 @@ func NewGmapJob(id, langCode, query string, maxDepth int, extractEmail bool) *Gm
 	query = url.QueryEscape(query)
 
 	const (
-		maxRetries = 3
+		maxRetries = 1
 		prio       = scrapemate.PriorityLow
 	)
 

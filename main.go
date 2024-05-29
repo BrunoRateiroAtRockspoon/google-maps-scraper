@@ -4,7 +4,7 @@ import (
 	"context"
 	"net/http"
 	"os"
-	"runtime"
+	// "runtime"
 	"strings"
 	"time"
 
@@ -38,7 +38,9 @@ func scrapeHandler(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer close(done) // Ensure the channel is closed when the request is done
 
-		ctx := context.Background()
+		// Create a context with timeout
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel() // Ensure the context is canceled when the request is done
 
 		query := r.URL.Query().Get("query")
 		if query == "" {
@@ -60,11 +62,13 @@ func scrapeHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Start the job and ensure cleanup
 		logrus.Infof("Starting job for query: %s", query)
 		if err := app.Start(ctx, job); err != nil {
 			httpError(w, err)
+		} else {
+			logrus.Infof("Finished job for query: %s", query)
 		}
-		logrus.Infof("Finished job for query: %s", query)
 	}()
 
 	// Wait for the goroutine to finish before returning
@@ -73,7 +77,7 @@ func scrapeHandler(w http.ResponseWriter, r *http.Request) {
 
 func getScrapeArgs() arguments {
 	return arguments{
-		concurrency:              runtime.NumCPU(), // Use all CPUs for better concurrency
+		concurrency:              1,
 		maxDepth:                 1,
 		langCode:                 "en",
 		exitOnInactivityDuration: 20 * time.Second, // Increase inactivity duration
