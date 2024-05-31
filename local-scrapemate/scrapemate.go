@@ -266,7 +266,6 @@ func (s *ScrapeMate) Start() error {
 					"speed", fmt.Sprintf("%.2f jobs/min", perMinute),
 				)
 
-				// if s.exitOnInactivity && time.Now().UTC().Sub(lastActivityAt) > s.exitOnInactivityDuration {
 				if numOfJobsCompleted == 2 || numOfJobsFailed == 1 {
 					err := fmt.Errorf("%w: %s", ErrInactivityTimeout, lastActivityAt.Format(time.RFC3339))
 
@@ -282,6 +281,9 @@ func (s *ScrapeMate) Start() error {
 	wg.Wait()
 
 	<-s.Done()
+
+	// Fechando o canal exitChan para garantir que não haja vazamento de recursos
+	close(exitChan)
 
 	return s.Err()
 }

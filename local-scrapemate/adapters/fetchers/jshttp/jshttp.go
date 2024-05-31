@@ -52,7 +52,7 @@ func (o *jsFetch) PutBrowser(ctx context.Context, b *browser) {
 	}
 }
 
-// Fetch fetches the url specicied by the job and returns the response
+// Fetch fetches the url specified by the job and returns the response
 func (o *jsFetch) Fetch(ctx context.Context, job scrapemate.IJob) scrapemate.Response {
 	browser, err := o.GetBrowser(ctx)
 	if err != nil {
