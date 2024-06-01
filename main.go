@@ -3,8 +3,9 @@ package main
 import (
 	"context"
 	"net/http"
+	_ "net/http/pprof"
 	"os"
-	// "runtime"
+	"runtime"
 	"strings"
 	"time"
 
@@ -25,6 +26,10 @@ func main() {
 		}
 		os.Exit(0)
 	}
+
+	go func() {
+		http.ListenAndServe(":6060", nil)
+	}()
 
 	http.HandleFunc("/scrape", scrapeHandler)
 	logrus.Info("Starting server on :8080")
@@ -69,6 +74,13 @@ func scrapeHandler(w http.ResponseWriter, r *http.Request) {
 		} else {
 			logrus.Infof("Finished job for query: %s", query)
 		}
+
+		// Close the ScrapemateApp instance and associated resources
+		if err := app.Close(); err != nil {
+			logrus.Errorf("Failed to close ScrapemateApp: %v", err)
+		}
+
+		logrus.Infof("Number of Go Routines: %d", runtime.NumGoroutine())
 	}()
 
 	// Wait for the goroutine to finish before returning

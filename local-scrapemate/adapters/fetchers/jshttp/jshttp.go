@@ -2,7 +2,6 @@ package jshttp
 
 import (
 	"context"
-
 	"github.com/gosom/scrapemate"
 	"github.com/playwright-community/playwright-go"
 )
@@ -61,7 +60,9 @@ func (o *jsFetch) Fetch(ctx context.Context, job scrapemate.IJob) scrapemate.Res
 		}
 	}
 
-	defer o.PutBrowser(ctx, browser)
+	defer func() {
+		browser.Close()
+	}()
 
 	if job.GetTimeout() > 0 {
 		var cancel context.CancelFunc
