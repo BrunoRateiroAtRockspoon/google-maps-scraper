@@ -27,9 +27,9 @@ func main() {
 		os.Exit(0)
 	}
 
-	go func() {
-		http.ListenAndServe(":6060", nil)
-	}()
+	// go func() {
+	// 	http.ListenAndServe(":6060", nil)
+	// }()
 
 	http.HandleFunc("/scrape", scrapeHandler)
 	logrus.Info("Starting server on :8080")
